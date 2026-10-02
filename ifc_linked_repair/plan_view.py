@@ -11,11 +11,12 @@ import numpy as np
 
 from .footprint import points_in_polygon
 from .model import DetectionReport, ManualBoundary, load_boundaries, save_boundaries
+from .theme import BORDER, FONTS, SURFACE
 
-PALETTE = ["#2e9e44", "#1f6fd1", "#e07b00", "#8e44ad", "#c0392b", "#16a085", "#d4ac0d", "#5d6d7e",
-           "#d35400", "#2c3e50", "#7f8c8d", "#27ae60"]
-EXCLUDED = "#e74c3c"
-ZONE = "#111111"
+PALETTE = ["#2563EB", "#059669", "#D97706", "#7C3AED", "#DB2777", "#0891B2", "#65A30D", "#475569",
+           "#EA580C", "#4F46E5", "#0D9488", "#A16207"]
+EXCLUDED = "#DC2626"
+ZONE = "#111827"
 
 
 def _tint(hex_colour: str, amount: float) -> str:
@@ -27,7 +28,7 @@ def _tint(hex_colour: str, amount: float) -> str:
 
 class PlanView(ttk.Frame):
     def __init__(self, master, on_apply: Callable[[], None]):
-        super().__init__(master)
+        super().__init__(master, style="Surface.TFrame", padding=12)
         self.on_apply = on_apply
         self.report: Optional[DetectionReport] = None
         self.plan = None
@@ -45,25 +46,26 @@ class PlanView(ttk.Frame):
     # ------------------------------------------------------------ layout
 
     def _build(self) -> None:
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=(0, 4))
-        ttk.Button(bar, text="Fit", command=self._refit).pack(side="left")
+        bar = ttk.Frame(self, style="Surface.TFrame")
+        bar.pack(fill="x", pady=(0, 8))
         self.draw_btn = ttk.Button(bar, text="Draw block boundary", command=self.start_drawing)
-        self.draw_btn.pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Clear drawn", command=self.clear_boundaries).pack(side="left", padx=(4, 0))
-        ttk.Button(bar, text="Load boundaries...", command=self.load).pack(side="left", padx=(12, 0))
-        ttk.Button(bar, text="Save boundaries...", command=self.save).pack(side="left", padx=(4, 0))
-        self.apply_btn = ttk.Button(bar, text="Apply drawn boundaries", command=self.on_apply)
+        self.draw_btn.pack(side="left")
+        ttk.Button(bar, text="Fit view", command=self._refit).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Clear drawn", command=self.clear_boundaries).pack(side="left", padx=(8, 0))
+        tk.Frame(bar, background=BORDER, width=1).pack(side="left", fill="y", padx=12, pady=4)
+        ttk.Button(bar, text="Load...", command=self.load).pack(side="left")
+        ttk.Button(bar, text="Save...", command=self.save).pack(side="left", padx=(8, 0))
+        self.apply_btn = ttk.Button(bar, text="Apply drawn boundaries", style="Primary.TButton", command=self.on_apply)
         self.apply_btn.pack(side="right")
 
-        ttk.Label(self, textvariable=self.hint, foreground="#555").pack(anchor="w")
-        body = ttk.Frame(self)
+        ttk.Label(self, textvariable=self.hint, style="Muted.Surface.TLabel").pack(anchor="w", pady=(0, 6))
+        body = ttk.Frame(self, style="Surface.TFrame")
         body.pack(fill="both", expand=True)
-        self.legend = ttk.Frame(body, width=300)
-        self.legend.pack(side="right", fill="y", padx=(6, 0))
-        self.canvas = tk.Canvas(body, background="#ffffff", highlightthickness=1, highlightbackground="#bbb")
+        self.legend = ttk.Frame(body, style="Surface.TFrame", width=280)
+        self.legend.pack(side="right", fill="y", padx=(12, 0))
+        self.canvas = tk.Canvas(body, background="#FBFBFC", highlightthickness=1, highlightbackground=BORDER)
         self.canvas.pack(side="left", fill="both", expand=True)
-        ttk.Label(self, textvariable=self.hover, foreground="#333").pack(anchor="w")
+        ttk.Label(self, textvariable=self.hover, style="Muted.Surface.TLabel").pack(anchor="w", pady=(6, 0))
 
         c = self.canvas
         c.bind("<Configure>", self._resized)
@@ -192,31 +194,45 @@ class PlanView(ttk.Frame):
             cx = sum(coords[0::2]) / len(zone.points)
             cy = sum(coords[1::2]) / len(zone.points)
             c.create_text(cx, cy, text=zone.name or f"Boundary {i + 1}", fill=ZONE,
-                          font=("Segoe UI", 10, "bold"), tags=("zone", f"zone{i}"))
+                          font=FONTS.get("bold", ("Segoe UI", 10, "bold")), tags=("zone", f"zone{i}"))
 
     def _fill_legend(self) -> None:
         for child in self.legend.winfo_children():
             child.destroy()
-        ttk.Label(self.legend, text="Blocks", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(self.legend, text="BLOCKS", style="Section.Surface.TLabel").pack(anchor="w", pady=(0, 6))
         colours = self.block_colours()
         by_id = {b.step_id: b for b in self.report.buildings}
         for k in self.report.blocks:
-            row = ttk.Frame(self.legend)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, background=colours[k.master_id], width=2).pack(side="left")
             master = by_id[k.master_id]
             linked = sum(1 for i in k.member_ids if i != k.master_id)
-            ttk.Label(row, text=f"#{k.master_id} {master.global_id}\n{len(k.storeys)} storeys, {linked} linked",
-                      justify="left").pack(side="left", padx=4)
+            self._legend_row(colours[k.master_id], master.global_id,
+                             f"#{k.master_id} · {len(k.storeys)} storeys · {linked} linked")
         excluded = [b for b in self.report.linked_buildings if not b.included]
         if excluded:
-            row = ttk.Frame(self.legend)
-            row.pack(fill="x", pady=(6, 1))
-            tk.Label(row, background=_tint(EXCLUDED, 0.35), width=2).pack(side="left")
-            ttk.Label(row, text=f"{len(excluded)} linked branch(es) not included").pack(side="left", padx=4)
+            self._legend_row(EXCLUDED, "Not included", f"{len(excluded)} linked branch(es) left out")
         if self.boundaries:
-            ttk.Label(self.legend, text=f"\nDrawn boundaries: {len(self.boundaries)}\nRight-click one to delete it.",
-                      justify="left").pack(anchor="w")
+            ttk.Label(self.legend, text="DRAWN BOUNDARIES", style="Section.Surface.TLabel").pack(anchor="w", pady=(14, 4))
+            for zone in self.boundaries:
+                master = next((b for b in self.report.buildings
+                               if zone.master_global_id and b.global_id == zone.master_global_id), None)
+                detail = f"master #{master.step_id}" if master else "master: tallest inside"
+                self._legend_row(ZONE, zone.name or "Boundary", detail, outline=True)
+            ttk.Label(self.legend, text="Right-click an outline to delete it.",
+                      style="Muted.Surface.TLabel").pack(anchor="w", pady=(4, 0))
+
+    def _legend_row(self, colour: str, title: str, detail: str, outline: bool = False) -> None:
+        row = ttk.Frame(self.legend, style="Surface.TFrame")
+        row.pack(fill="x", pady=4)
+        swatch = tk.Canvas(row, width=14, height=14, background=SURFACE, highlightthickness=0)
+        if outline:
+            swatch.create_rectangle(2, 2, 12, 12, outline=colour, dash=(2, 1), width=2)
+        else:
+            swatch.create_oval(1, 1, 13, 13, fill=colour, outline="")
+        swatch.pack(side="left", anchor="n", pady=3)
+        text = ttk.Frame(row, style="Surface.TFrame")
+        text.pack(side="left", padx=8)
+        ttk.Label(text, text=title, style="Strong.Surface.TLabel").pack(anchor="w")
+        ttk.Label(text, text=detail, style="Muted.Surface.TLabel").pack(anchor="w")
 
     # ------------------------------------------------------------ hover / pan
 
