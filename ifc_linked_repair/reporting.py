@@ -26,6 +26,9 @@ def format_detection(report: DetectionReport) -> str:
         return "\n".join(lines)
     by_id = {b.step_id: b for b in report.buildings}
     linked = report.linked_buildings
+    drawn = getattr(report, "manual_boundaries", None) or []
+    if drawn:
+        lines.append(f"Drawn block boundaries: {len(drawn)} (override auto-detection inside them)")
     lines.append(
         f"Blocks: {len(report.blocks)}   Likely linked branches: "
         f"{sum(b.likely_linked for b in linked)} of {len(linked)} extra building(s)"

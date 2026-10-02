@@ -15,7 +15,7 @@ import ifcopenshell.util.placement
 import ifcopenshell.util.unit
 import numpy as np
 
-from .footprint import PlanData, build_boundary, collect_plan_data
+from .footprint import PlanData, build_boundary, collect_plan_data, points_in_polygon
 from .model import (
     MODE_BRANCH,
     BlockInfo,
@@ -193,6 +193,7 @@ class _Grouping:
         self.host: dict[int, int] = {}
         self.notes: list[str] = []
         self.ambiguous: dict[int, list[int]] = {}
+        self.fixed: set[int] = set()  # placed by a drawn boundary; auto rules leave them alone
 
     def boundary(self, building_id: int):
         if building_id not in self._boundaries:
@@ -211,6 +212,7 @@ class _Grouping:
         return np.array([h.mean(axis=0) for h in hulls]) if hulls else np.zeros((0, 2))
 
     def run(self) -> None:
+        self._by_drawn_boundaries()
         self._by_geometry()
         self._by_origin()
         for building_id, roots in self.ambiguous.items():
@@ -219,9 +221,47 @@ class _Grouping:
                 f"({', '.join('#' + str(r) for r in roots)}) and its geometry fits none; left as its own block."
             )
 
+    def _by_drawn_boundaries(self) -> None:
+        zones = self.options.manual_boundaries
+        if not zones:
+            return
+        ratio = self.options.containment_ratio
+        members: dict[int, list[BuildingInfo]] = {i: [] for i in range(len(zones))}
+        for b in self.buildings:
+            centres = self.centres(b.step_id)
+            if not len(centres):
+                continue
+            shares = [float(points_in_polygon(centres, z.points).mean()) for z in zones]
+            best = max(range(len(zones)), key=lambda i: shares[i])
+            if shares[best] >= ratio:
+                members[best].append(b)
+        by_guid = {b.global_id: b for b in self.buildings}
+        for i, zone in enumerate(zones):
+            label = zone.name or f"drawn boundary {i + 1}"
+            group = members[i]
+            master = by_guid.get(zone.master_global_id) if zone.master_global_id else None
+            if zone.master_global_id and master is None:
+                self.notes.append(f"{label}: master {zone.master_global_id} not found; using the tallest building inside.")
+            if master is None:
+                if not group:
+                    self.notes.append(f"{label}: no building has most of its elements inside; ignored.")
+                    continue
+                master = max(group, key=lambda b: (len(b.storeys), b.total_elements, -b.step_id))
+            self.host.pop(master.step_id, None)
+            self.fixed.add(master.step_id)
+            master.block_reason = f"block master chosen for {label}"
+            for b in group:
+                if b is master:
+                    continue
+                self.host[b.step_id] = master.step_id
+                self.fixed.add(b.step_id)
+                b.block_reason = f"inside {label}"
+
     def _by_geometry(self) -> None:
         ratio = self.options.containment_ratio
         for b in self.buildings:
+            if b.step_id in self.fixed:
+                continue
             centres = self.centres(b.step_id)
             if not len(centres):
                 continue
@@ -248,7 +288,7 @@ class _Grouping:
             changed = False
             hosts = set(self.host.values())
             for b in self.buildings:
-                if b.step_id in self.host or b.step_id in hosts:
+                if b.step_id in self.host or b.step_id in hosts or b.step_id in self.fixed:
                     continue  # placed already, or a block that holds branches inside its boundary
                 twins = [s for s in self.buildings if s is not b and _same_origin(s, b, self.tol)]
                 # 1. a stacked copy of a branch that is already placed follows it
@@ -324,6 +364,7 @@ def analyze(
         master_storeys=[],
     )
     report.plan_products = {b.step_id: ids for b, ids in infos}  # for the plan drawing; not serialised
+    report.manual_boundaries = list(options.manual_boundaries)
     if not buildings:
         report.warnings.append("No IfcBuilding found.")
         return report

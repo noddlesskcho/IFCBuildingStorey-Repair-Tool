@@ -10,6 +10,24 @@ MODE_BRANCH = "branch"  # whole linked building matched by the building placemen
 
 
 @dataclass
+class ManualBoundary:
+    """A block outline drawn by the user."""
+
+    points: list[tuple[float, float]]  # plan polygon in project length units
+    name: str = ""
+    master_global_id: str = ""  # empty = building with the most storeys inside
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "master_global_id": self.master_global_id,
+                "points": [[float(x), float(y)] for x, y in self.points]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ManualBoundary":
+        return cls(points=[(float(x), float(y)) for x, y in data["points"]],
+                   name=data.get("name", ""), master_global_id=data.get("master_global_id", ""))
+
+
+@dataclass
 class RepairOptions:
     mode: str = MODE_STOREY
     # Max distance between a linked level and the master storey it is matched to.
@@ -22,6 +40,9 @@ class RepairOptions:
     # Share of a building's element centres that must fall inside a block boundary.
     containment_ratio: float = 0.6
     use_geometry: bool = True
+    # Block boundaries drawn by the user (plan polygons, project length units).
+    # Buildings inside a drawn boundary form that block; the rest are auto-detected.
+    manual_boundaries: list["ManualBoundary"] = field(default_factory=list)
     remove_empty_branches: bool = True
     rebase_placements: bool = True
     # Force single-block mode: every other building is treated as a branch of this one.
@@ -197,3 +218,19 @@ class RepairResult:
     changelog_csv: str = ""
     report_md: str = ""
     block_plan_svg: str = ""
+
+
+def load_boundaries(path: str) -> list[ManualBoundary]:
+    import json
+
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return [ManualBoundary.from_dict(item) for item in data.get("boundaries", [])]
+
+
+def save_boundaries(path: str, boundaries: list[ManualBoundary], length_unit: str = "", source: str = "") -> None:
+    import json
+
+    data = {"length_unit": length_unit, "source_ifc": source, "boundaries": [b.to_dict() for b in boundaries]}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)

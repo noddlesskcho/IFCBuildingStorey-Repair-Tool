@@ -48,6 +48,11 @@ You can also double-click `run_app.bat`.
 
 1. Click **Browse...** and select the IFC. Analysis starts automatically.
 2. Review the tabs:
+   - **Block plan**: plan view of every element, coloured by the block it
+     was assigned to. Block masters are light and linked branches dark.
+     Linked branches that are not included show in red. Hover over an
+     element to see its building and why it joined its block. Use the mouse
+     wheel to zoom and right-drag to pan.
    - **Detection report**: number of buildings, master building candidate,
      master storeys with their absolute Z, likely linked branches, element
      counts and warnings.
@@ -55,9 +60,23 @@ You can also double-click `run_app.bat`.
    - **Proposed changes**: each linked container mapped to its target master
      storey, with the elevation delta.
    - **Element preview**: every element that will move.
-3. Click **Export fixed IFC...** and choose the output file. The tool refuses to
+3. If the blocks are wrong, draw them yourself in the **Block plan** tab:
+   - Click **Draw block boundary**, then click each corner of the outline.
+     Double-click or press Enter to finish. Backspace removes the last
+     point and Esc cancels.
+   - Choose the block master: the building that receives the elements.
+     Auto picks the tallest building inside the outline.
+   - Draw more outlines as needed, then click **Apply drawn boundaries**.
+     Every building with at least 60% of its elements inside an outline
+     joins that block. Buildings outside every outline are still
+     auto-detected.
+   - Right-click an outline to delete it. Use **Save boundaries...** to
+     keep the outlines as JSON for the next export of the same project.
+     **Load boundaries...** brings them back, and so does `--boundaries` on
+     the command line.
+4. Click **Export fixed IFC...** and choose the output file. The tool refuses to
    save over the input file.
-4. The **Export log** tab shows the verification results.
+5. The **Export log** tab shows the verification results.
 
 Command line:
 
@@ -73,6 +92,7 @@ The `repair` command takes these options:
 - `--tolerance 0.3`: elevation match tolerance in metres
 - `--containment 0.6`: share of a building's elements that must lie inside a block boundary
 - `--boundary-margin 1.0`: margin in metres around a block boundary
+- `--boundaries zones.json`: block outlines drawn and saved in the app
 - `--no-geometry`: skip tessellation and find blocks from link origins only
 - `--master-id N`
 - `--include ID ...`
@@ -95,6 +115,7 @@ Code layout (the core logic has no UI dependency):
 |---|---|
 | `detection.py` | Reads the spatial tree, resolves absolute Z values, groups buildings into blocks, classifies linked branches and builds the plan |
 | `footprint.py` | Tessellates elements and builds each block's plan boundary |
+| `plan_view.py` | Block plan tab: plan drawing and boundary editing |
 | `repair.py` | Applies the plan to the model in memory and writes the output safely |
 | `verify.py` | Compares the original and repaired files |
 | `reporting.py` | Writes the text summary, the CSV change log and the Markdown report |
@@ -126,6 +147,9 @@ Code layout (the core logic has no UI dependency):
      adjacent towers. It is not a bounding box. Element placement points are
      not used, because Revit often writes them at the link origin, far from
      the element.
+   - **Drawn boundaries come first.** A building with at least 60% of its
+     element centres inside a user-drawn outline joins that outline's block.
+     The auto rules below skip these buildings.
    - **Containment.** A building joins the smallest host that has more
      storeys and holds at least 60% (`--containment`) of its element centres
      inside the host's boundary. Chains resolve to the top block, so a unit

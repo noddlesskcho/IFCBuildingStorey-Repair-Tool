@@ -56,6 +56,20 @@ def _inside_convex(hull: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray
     return inside
 
 
+def points_in_polygon(points: np.ndarray, polygon) -> np.ndarray:
+    """Even-odd rule point-in-polygon for any simple polygon (concave allowed)."""
+    poly = np.asarray(polygon, dtype=float)
+    x, y = points[:, 0], points[:, 1]
+    inside = np.zeros(len(points), dtype=bool)
+    for i in range(len(poly)):
+        (x0, y0), (x1, y1) = poly[i], poly[i - 1]
+        crosses = (y0 > y) != (y1 > y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x_cross = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+        inside ^= crosses & (x < x_cross)
+    return inside
+
+
 # ---------------------------------------------------------------- per-element plan geometry
 
 

@@ -10,6 +10,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from .detection import analyze
+from .footprint import cached_plan_data
+from .plan_view import PlanView
 from .model import MODE_BRANCH, MODE_STOREY, DetectionReport, RepairOptions
 from .repair import OutputSafetyError, check_output_path, default_output_path, repair_file
 from .reporting import format_detection
@@ -67,6 +69,8 @@ class App(ttk.Frame):
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True)
         self.summary = self._text_tab("Detection report")
+        self.plan_view = PlanView(self.tabs, on_apply=self._apply_boundaries)
+        self.tabs.add(self.plan_view, text="Block plan")
         self.buildings = self._tree_tab(
             "Buildings",
             [("role", 70), ("include", 70), ("id", 70), ("guid", 190), ("block", 190), ("z", 90),
@@ -107,6 +111,7 @@ class App(ttk.Frame):
         xs.pack(side="bottom", fill="x")
         text.pack(fill="both", expand=True)
         self.tabs.add(frame, text=title)
+        self.tab_frames[title] = frame
         return text
 
     def _tree_tab(self, title: str, columns, hint: str = "") -> ttk.Treeview:
@@ -145,6 +150,7 @@ class App(ttk.Frame):
             self.path_var.set(path)
             self.include_ids = None
             self.master_var.set(AUTO)
+            self.plan_view.boundaries = []
             self._analyze()
 
     def _repair_options(self) -> RepairOptions | None:
@@ -164,6 +170,7 @@ class App(ttk.Frame):
             rebase_placements=self.rebase_var.get(),
             master_building_id=master_id,
             include_building_ids=self.include_ids,
+            manual_boundaries=list(self.plan_view.boundaries),
         )
 
     def _run(self, label: str, func, on_done) -> None:
@@ -217,6 +224,7 @@ class App(ttk.Frame):
         self._fill_buildings()
         self._fill_mapping()
         self._fill_elements()
+        self.plan_view.show(report, cached_plan_data(report.path))
         can_export = report.repair_needed or (self.remove_var.get() and bool(report.empty_linked_branches))
         self.export_btn.configure(state="normal" if can_export else "disabled")
         if report.repair_needed:
@@ -225,7 +233,8 @@ class App(ttk.Frame):
             self.status_var.set("No elements to move; empty linked branches can be removed.")
         else:
             self.status_var.set("No repair needed.")
-        self.tabs.select(0)
+        has_plan = bool(getattr(report, "plan_products", None)) and cached_plan_data(report.path) is not None
+        self.tabs.select(self.plan_view if has_plan and len(report.buildings) > 1 else self.tab_frames["Detection report"])
 
     def _fill_buildings(self) -> None:
         tree, r = self.buildings, self.report
@@ -268,6 +277,13 @@ class App(ttk.Frame):
             tree.insert("", "end", values=(m.step_id, m.global_id, m.ifc_class, m.name, m.relation,
                                            f"#{m.source_id} {m.source_name}",
                                            self._block_label(m.target_building_id), m.target_name))
+
+    def _apply_boundaries(self) -> None:
+        if self.report is None or self.busy:
+            return
+        self.include_ids = None  # let detection re-decide which branches are included
+        self.master_var.set(AUTO)
+        self._analyze()
 
     def _toggle_include(self, event) -> None:
         if self.report is None or self.busy:
@@ -326,7 +342,7 @@ class App(ttk.Frame):
             lines.append("Verification:")
             lines += [f"  [{'PASS' if c.passed else 'FAIL'}] {c.name}: {c.detail}" for c in result.verification.checks]
         self._set_text(self.log, "\n".join(lines))
-        self.tabs.select(4)
+        self.tabs.select(self.tab_frames["Export log"])
         self.export_btn.configure(state="normal")
         passed = result.verification is None or result.verification.passed
         self.status_var.set("Export complete." if passed else "Export complete with verification FAILURES.")

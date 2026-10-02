@@ -168,3 +168,42 @@ def test_single_block_mode_override(tmp_path):
     block_a = info["blocks"]["A"]["building"].id()
     report = analyze(path, RepairOptions(master_building_id=block_a))
     assert len(report.blocks) == 1 and report.master_building_id == block_a
+
+
+def test_points_in_concave_polygon():
+    from ifc_linked_repair.footprint import points_in_polygon
+    import numpy as np
+
+    l_shape = [(0, 0), (10, 0), (10, 4), (4, 4), (4, 10), (0, 10)]
+    pts = np.array([(2, 2), (8, 2), (2, 8), (8, 8), (-1, 5)], dtype=float)
+    assert points_in_polygon(pts, l_shape).tolist() == [True, True, True, False, False]
+
+
+def test_drawn_boundary_overrides_auto_blocks(tmp_path):
+    from ifc_linked_repair.model import ManualBoundary, load_boundaries, save_boundaries
+
+    model, info = build_multi_block(unit_own_origin=True)
+    path = _write(tmp_path, model)
+    block_a = info["blocks"]["A"]["building"]
+    block_b = info["blocks"]["B"]["building"]
+    # one outline around both blocks, mastered by Block A: Block B and every unit join A
+    both = ManualBoundary(points=[(-40000, -30000), (50000, -30000), (50000, 40000), (-40000, 40000)],
+                          name="Whole estate", master_global_id=block_a.GlobalId)
+    json_path = str(tmp_path / "zones.json")
+    save_boundaries(json_path, [both], "mm", path)
+    zones = load_boundaries(json_path)
+    report = analyze(path, RepairOptions(manual_boundaries=zones))
+    a = report.block_of(block_a.id())
+    assert block_b.id() in a.member_ids
+    for label in ("A", "B"):
+        for unit in info["blocks"][label]["units"]:
+            assert unit["building"].id() in a.member_ids
+    assert all("Whole estate" in b.block_reason for b in report.buildings
+               if b.block_id == block_a.id() and b.role != "master")
+    # the site host is outside the drawn outline's majority test and stays auto-detected
+    assert report.block_of(info["host"].id()).master_id == info["host"].id()
+
+    # outline with auto master picks the tallest building inside (Block B, 8 storeys)
+    auto = ManualBoundary(points=both.points)
+    report = analyze(path, RepairOptions(manual_boundaries=[auto]))
+    assert report.block_of(block_a.id()).master_id == block_b.id()

@@ -12,7 +12,7 @@ import json
 import sys
 
 from .detection import analyze
-from .model import MODE_BRANCH, MODE_STOREY, RepairOptions
+from .model import MODE_BRANCH, MODE_STOREY, RepairOptions, load_boundaries
 from .repair import OutputSafetyError, repair_file
 from .reporting import format_detection
 
@@ -24,6 +24,7 @@ def _options(args) -> RepairOptions:
         boundary_margin_m=args.boundary_margin,
         containment_ratio=args.containment,
         use_geometry=not args.no_geometry,
+        manual_boundaries=load_boundaries(args.boundaries) if args.boundaries else [],
         remove_empty_branches=not args.keep_branches,
         rebase_placements=not args.no_rebase,
         master_building_id=args.master_id,
@@ -39,6 +40,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--tolerance", type=float, default=0.3, help="elevation match tolerance in metres (default 0.3)")
     p.add_argument("--containment", type=float, default=0.6,
                    help="share of a building's elements that must lie inside a block boundary (default 0.6)")
+    p.add_argument("--boundaries", metavar="JSON",
+                   help="block boundaries drawn in the app (Save boundaries...); overrides auto-detection inside them")
     p.add_argument("--no-geometry", action="store_true",
                    help="do not tessellate geometry; find blocks from link origins only")
     p.add_argument("--boundary-margin", type=float, default=1.0,
