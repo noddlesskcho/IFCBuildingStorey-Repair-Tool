@@ -19,6 +19,7 @@ import ifcopenshell
 import ifcopenshell.guid
 import numpy as np
 
+from .footprint import cached_plan_data
 from .detection import absolute_matrix, analyze, children_of, is_spatial_container, spatial_contents
 from .model import DetectionReport, RepairOptions, RepairResult
 
@@ -275,7 +276,7 @@ def repair_file(
     write_logs: bool = True,
     verify_output: bool = True,
 ) -> RepairResult:
-    from .reporting import write_change_log, write_markdown_report
+    from .reporting import write_block_plan_svg, write_change_log, write_markdown_report
     from .verify import verify
 
     options = options or RepairOptions()
@@ -312,5 +313,6 @@ def repair_file(
     if write_logs:
         stem = os.path.splitext(output_path)[0]
         result.changelog_csv = write_change_log(result, stem + ".changelog.csv")
+        result.block_plan_svg = write_block_plan_svg(report, cached_plan_data(input_path), stem + ".blocks.svg")
         result.report_md = write_markdown_report(result, stem + ".report.md")
     return result

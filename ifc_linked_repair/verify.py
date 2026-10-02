@@ -6,12 +6,14 @@ step id and cross-checked by GlobalId (Revit can repeat GUIDs across link copies
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 
 import ifcopenshell
 import numpy as np
 
 from .detection import absolute_matrix, analyze, spatial_contents
+from .footprint import cached_plan_data
 from .model import Check, DetectionReport, RepairOptions, VerificationResult
 
 _SPATIAL_RELS = ("IfcRelContainedInSpatialStructure", "IfcRelReferencedInSpatialStructure")
@@ -225,10 +227,9 @@ def verify(
 
     # 7. re-detection on the output
     included = {b.step_id for b in report.included_buildings}
-    again = analyze(repaired, RepairOptions(mode=options.mode, tolerance_m=options.tolerance_m,
-                                            boundary_margin_m=options.boundary_margin_m,
-                                            master_building_id=options.master_building_id,
-                                            include_building_ids=included))
+    # same step ids and geometry as the original, so reuse its tessellation
+    again = analyze(repaired, dataclasses.replace(options, include_building_ids=included),
+                    known_plan=cached_plan_data(original_path))
     result.checks.append(
         Check(
             "Re-detection finds no remaining linked elements",

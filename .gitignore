@@ -4,3 +4,4 @@ __pycache__/
 *.ifc
 *.changelog.csv
 *.report.md
+*.blocks.svg

@@ -131,9 +131,11 @@ def test_never_overwrites_input(tmp_path):
     assert existing.read_text() == "x"
 
 
-@pytest.mark.parametrize("unit_own_origin", [False, True])
-def test_multi_block_units_stay_in_their_block(tmp_path, unit_own_origin):
-    model, info = build_multi_block(unit_own_origin=unit_own_origin)
+@pytest.mark.parametrize(
+    "unit_own_origin, blocks_share_origin", [(False, False), (True, False), (True, True)]
+)
+def test_multi_block_units_stay_in_their_block(tmp_path, unit_own_origin, blocks_share_origin):
+    model, info = build_multi_block(unit_own_origin=unit_own_origin, blocks_share_origin=blocks_share_origin)
     path = _write(tmp_path, model)
     report = analyze(path)
     assert len(report.blocks) == 3
@@ -143,8 +145,8 @@ def test_multi_block_units_stay_in_their_block(tmp_path, unit_own_origin):
         for unit in block["units"]:
             b = next(x for x in report.buildings if x.step_id == unit["building"].id())
             assert b.block_id == block_id and b.included
-            expected_reason = "plan boundary" if unit_own_origin else "link origin"
-            assert expected_reason in b.block_reason
+            if unit_own_origin:
+                assert "plan boundary" in b.block_reason
             moves = [m for m in report.moves if m.building_id == b.step_id]
             assert {m.target_building_id for m in moves} == {block_id}
             assert {m.target_name for m in moves} == {storey_by_z[round(unit["z"])]}

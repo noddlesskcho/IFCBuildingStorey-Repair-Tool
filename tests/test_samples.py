@@ -58,3 +58,22 @@ def test_site_master_multi_block(tmp_path):
     assert by_guid["2zLkFg$5fCX9SSV3Lq4366"].role == "master"  # site host keeps its own walls
     result = repair_file(path, str(tmp_path / "fixed.ifc"))
     assert result.verification.passed
+
+
+def test_three_towers_with_podium(tmp_path):
+    """Three tower models share one link origin; typical units are linked with their own origins."""
+    report = analyze(_sample("24183_bck_str_cg03_submission-(2).ifc"))
+    by_guid = {b.global_id: b for b in report.buildings}
+    towers = {by_guid[g].step_id for g in ("1JV60H_kkRu437siSS0YFz", "1JNUhzL5ciEc1b3FXaTkJD", "2VttQrSTbWuFUsiW1aM5nw")}
+    podium = by_guid["1UQuhPxOz6TemH7tqtk5TT"].step_id
+    assert {k.master_id for k in report.blocks} == towers | {podium}
+    linked = report.linked_buildings
+    assert linked and all(b.included for b in linked)
+    assert {b.block_id for b in linked} == towers
+    assert not any(m.target_building_id == podium for m in report.moves)
+    # each tower keeps a separate boundary: no branch lies mostly in another tower
+    for b in linked:
+        if b.footprint:
+            cx, cy = (b.footprint[0] + b.footprint[2]) / 2, (b.footprint[1] + b.footprint[3]) / 2
+            x0, y0, x1, y1 = report.block_of(b.block_id).boundary
+            assert x0 <= cx <= x1 and y0 <= cy <= y1

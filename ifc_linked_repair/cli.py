@@ -22,6 +22,8 @@ def _options(args) -> RepairOptions:
         mode=args.mode,
         tolerance_m=args.tolerance,
         boundary_margin_m=args.boundary_margin,
+        containment_ratio=args.containment,
+        use_geometry=not args.no_geometry,
         remove_empty_branches=not args.keep_branches,
         rebase_placements=not args.no_rebase,
         master_building_id=args.master_id,
@@ -34,7 +36,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mode", choices=[MODE_STOREY, MODE_BRANCH], default=MODE_STOREY,
                    help="storey: match each linked storey by its absolute Z (default); "
                         "branch: match the whole linked building by its placement Z")
-    p.add_argument("--tolerance", type=float, default=0.05, help="elevation match tolerance in metres (default 0.05)")
+    p.add_argument("--tolerance", type=float, default=0.3, help="elevation match tolerance in metres (default 0.3)")
+    p.add_argument("--containment", type=float, default=0.6,
+                   help="share of a building's elements that must lie inside a block boundary (default 0.6)")
+    p.add_argument("--no-geometry", action="store_true",
+                   help="do not tessellate geometry; find blocks from link origins only")
     p.add_argument("--boundary-margin", type=float, default=1.0,
                    help="margin in metres around a block's plan boundary (default 1.0)")
     p.add_argument("--master-id", type=int,
@@ -91,6 +97,8 @@ def main(argv=None) -> int:
     print(f"Written: {result.output_path}")
     print(f"Change log: {result.changelog_csv}")
     print(f"Report: {result.report_md}")
+    if result.block_plan_svg:
+        print(f"Block plan: {result.block_plan_svg}")
     if result.verification:
         for c in result.verification.checks:
             print(f"  [{'PASS' if c.passed else 'FAIL'}] {c.name}: {c.detail}")

@@ -121,12 +121,14 @@ def build(linked_offsets=(), unit_level_names=("Base Level", "Top Level"), separ
     return model, info
 
 
-def build_multi_block(unit_own_origin=False):
+def build_multi_block(unit_own_origin=False, blocks_share_origin=False):
     """Site host + Block A (5 storeys) + Block B (8 storeys from Z 2000), each with linked units.
 
     Units normally share their block's plan origin (how Revit writes nested links).
     With unit_own_origin=True each unit gets its own origin, so only the plan boundary
-    can tie it to its block.
+    can tie it to its block. With blocks_share_origin=True every block model is
+    linked at the same origin (as when several tower models share project
+    coordinates) and its contents carry the plan offset instead.
     """
     model = ifcopenshell.file(schema="IFC4")
     project = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="Project Number")
@@ -156,8 +158,10 @@ def build_multi_block(unit_own_origin=False):
         "A": (-20000.0, -10000.0, 0.0, 5, (0.0, 3600.0, 7200.0, 10800.0)),
         "B": (30000.0, 20000.0, 2000.0, 8, (2000.0, 5600.0, 9200.0)),
     }.items():
+        bx, by = (0.0, 0.0) if blocks_share_origin else (ox, oy)  # block placement origin
+        dx, dy = ox - bx, oy - by  # offset of the block's contents from that origin
         block = _spatial(model, "IfcBuilding", "Building Name", site,
-                         _placement(model, site.ObjectPlacement, ox, oy, base_z))
+                         _placement(model, site.ObjectPlacement, bx, by, base_z))
         storeys = [
             _spatial(model, "IfcBuildingStorey", f"Level {n + 1} Block {label}", block,
                      _placement(model, block.ObjectPlacement, z=3600.0 * n), Elevation=3600.0 * n)
@@ -166,8 +170,13 @@ def build_multi_block(unit_own_origin=False):
         corners = []
         for cx, cy in ((-15000.0, -15000.0), (15000.0, -15000.0), (15000.0, 15000.0), (-15000.0, 15000.0)):
             column = ifcopenshell.api.root.create_entity(model, ifc_class="IfcColumn", name=f"Column {label}")
-            column.ObjectPlacement = _placement(model, storeys[0].ObjectPlacement, cx, cy)
+            column.ObjectPlacement = _placement(model, storeys[0].ObjectPlacement, cx + dx, cy + dy)
+            column.Representation = _box(model, context, (600.0, 600.0, 3000.0))
             corners.append(column)
+        floor = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSlab", name=f"Floor {label}")
+        floor.ObjectPlacement = _placement(model, storeys[0].ObjectPlacement, dx, dy)
+        floor.Representation = _box(model, context, (31000.0, 31000.0, 250.0))
+        corners.append(floor)
         ifcopenshell.api.spatial.assign_container(model, products=corners, relating_structure=storeys[0])
         units = []
         for i, z in enumerate(unit_zs):

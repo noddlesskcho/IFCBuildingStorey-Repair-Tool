@@ -12,10 +12,16 @@ MODE_BRANCH = "branch"  # whole linked building matched by the building placemen
 @dataclass
 class RepairOptions:
     mode: str = MODE_STOREY
-    tolerance_m: float = 0.05
-    # Margin added around a block's plan boundary when testing whether a
-    # linked branch lies inside it.
+    # Max distance between a linked level and the master storey it is matched to.
+    # Revit link levels often sit a finish thickness (e.g. 50 mm) off the host storey.
+    tolerance_m: float = 0.3
+    # Block boundary: real plan outline of the block's own elements, gaps up to
+    # boundary_close_m bridged, holes filled, grown by boundary_margin_m.
     boundary_margin_m: float = 1.0
+    boundary_close_m: float = 3.0
+    # Share of a building's element centres that must fall inside a block boundary.
+    containment_ratio: float = 0.6
+    use_geometry: bool = True
     remove_empty_branches: bool = True
     rebase_placements: bool = True
     # Force single-block mode: every other building is treated as a branch of this one.
@@ -190,3 +196,4 @@ class RepairResult:
     verification: Optional[VerificationResult] = None
     changelog_csv: str = ""
     report_md: str = ""
+    block_plan_svg: str = ""

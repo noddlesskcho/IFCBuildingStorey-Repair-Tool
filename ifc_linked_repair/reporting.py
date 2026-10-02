@@ -143,7 +143,59 @@ def write_markdown_report(result: RepairResult, path: str) -> str:
         out += [
             f"- {'PASS' if c.passed else 'FAIL'}: {c.name} — {c.detail}" for c in result.verification.checks
         ]
-    out += ["", f"Per-element change log: `{os.path.basename(result.changelog_csv) or 'n/a'}`", ""]
+    out += ["", f"Per-element change log: `{os.path.basename(result.changelog_csv) or 'n/a'}`"]
+    if result.block_plan_svg:
+        out.append(f"Block plan (open in a browser): `{os.path.basename(result.block_plan_svg)}`")
+    out.append("")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out))
+    return path
+
+
+_BLOCK_COLOURS = ["#2e9e44", "#1f6fd1", "#e07b00", "#8e44ad", "#c0392b", "#16a085", "#d4ac0d", "#5d6d7e"]
+
+
+def write_block_plan_svg(report: DetectionReport, plan, path: str) -> str:
+    """Plan view of every element coloured by the block it was assigned to.
+
+    Block masters are drawn lighter, linked branches darker, so units outside
+    their block's outline stand out. Returns "" when no geometry is available.
+    """
+    products = getattr(report, "plan_products", None)
+    if plan is None or not products:
+        return ""
+    blocks = list(report.blocks)
+    colour = {k.master_id: _BLOCK_COLOURS[i % len(_BLOCK_COLOURS)] for i, k in enumerate(blocks)}
+    shapes = []
+    for b in sorted(report.buildings, key=lambda b: b.role != "master"):
+        for step_id in products.get(b.step_id, ()):
+            hull = plan.element_hulls.get(step_id)
+            if hull is not None and len(hull) >= 3:
+                shapes.append((hull, colour.get(b.block_id, "#ff0000"), 0.18 if b.role == "master" else 0.35))
+    if not shapes:
+        return ""
+    xs = [p[0] for h, _, _ in shapes for p in h]
+    ys = [p[1] for h, _, _ in shapes for p in h]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    width = 1200.0
+    scale = width / max(x1 - x0, 1e-9)
+    top = 24 + 16 * len(blocks)
+    height = (y1 - y0) * scale + top + 10
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0f}" height="{height:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" style="background:#ffffff">'
+    ]
+    for hull, fill, opacity in shapes:
+        pts = " ".join(f"{(x - x0) * scale:.1f},{(y1 - y) * scale + top:.1f}" for x, y in hull)
+        out.append(f'<polygon points="{pts}" fill="{fill}" fill-opacity="{opacity}"/>')
+    for i, k in enumerate(blocks):
+        members = len(k.member_ids) - 1
+        out.append(
+            f'<rect x="10" y="{8 + 16 * i}" width="12" height="12" fill="{colour[k.master_id]}"/>'
+            f'<text x="28" y="{18 + 16 * i}" font-family="Arial" font-size="12">'
+            f"#{k.master_id} {k.master_global_id}: {len(k.storeys)} storeys, {members} linked branch(es)</text>"
+        )
+    out.append("</svg>")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out))
     return path

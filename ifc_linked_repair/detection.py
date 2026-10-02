@@ -1,7 +1,8 @@
 """Detect linked-model spatial branches and propose master-storey mappings.
 
-Storey and building names are never used for matching. Every decision is based
-on the spatial relationship hierarchy and on absolute placement Z values.
+Storey and building names are never used for matching. Buildings are grouped
+into blocks by real plan geometry (and link origins as a fallback); elevations
+are matched by absolute placement Z.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from typing import Iterable, Optional, Union
 import ifcopenshell
 import ifcopenshell.util.placement
 import ifcopenshell.util.unit
+import numpy as np
 
+from .footprint import PlanData, build_boundary, collect_plan_data
 from .model import (
     MODE_BRANCH,
     BlockInfo,
@@ -123,23 +126,22 @@ def _storey_info(storey, building_z: float) -> StoreyInfo:
     )
 
 
-def _footprint(containers) -> Optional[tuple[float, float, float, float]]:
-    """Plan (XY) bounding box of the placement origins of everything held by the containers."""
-    xs, ys = [], []
-    for container in containers:
-        for element, relation in spatial_contents(container):
-            if relation == "referenced":
-                continue
-            matrix = absolute_matrix(element)
-            if matrix is not None:
-                xs.append(float(matrix[0][3]))
-                ys.append(float(matrix[1][3]))
-    if not xs:
-        return None
-    return (min(xs), min(ys), max(xs), max(ys))
+def _plan_products(building, storey_entities) -> list[int]:
+    """Step ids of products whose geometry describes a building (contents and their parts)."""
+    stack = [e for c in [building] + storey_entities for e, rel in spatial_contents(c) if rel != "referenced"]
+    found, seen = [], set()
+    while stack:
+        element = stack.pop()
+        if element.id() in seen or element.is_a("IfcOpeningElement"):
+            continue
+        seen.add(element.id())
+        if getattr(element, "Representation", None) is not None:
+            found.append(element.id())
+        stack.extend(children_of(element))
+    return found
 
 
-def _building_info(building) -> BuildingInfo:
+def _building_info(building) -> tuple[BuildingInfo, list[int]]:
     site = site_of(building)
     matrix = absolute_matrix(building)
     if matrix is None:
@@ -150,7 +152,7 @@ def _building_info(building) -> BuildingInfo:
         rot = math.degrees(math.atan2(matrix[1][0], matrix[0][0]))
     storey_entities = storeys_of(building)
     storeys = sorted((_storey_info(s, z) for s in storey_entities), key=lambda s: s.z)
-    return BuildingInfo(
+    info = BuildingInfo(
         step_id=building.id(),
         global_id=building.GlobalId,
         name=building.Name or "",
@@ -162,39 +164,8 @@ def _building_info(building) -> BuildingInfo:
         origin_x=ox,
         origin_y=oy,
         rotation_deg=rot,
-        footprint=_footprint([building] + storey_entities),
     )
-
-
-def _pick_master(buildings: list[BuildingInfo]) -> BuildingInfo:
-    # Most storeys wins, then most elements held directly by its storeys,
-    # then the earliest entity in the file (Revit writes the host model first).
-    return max(
-        buildings,
-        key=lambda b: (len(b.storeys), sum(s.element_count for s in b.storeys), -b.step_id),
-    )
-
-
-def _union(boxes) -> Optional[tuple[float, float, float, float]]:
-    boxes = [b for b in boxes if b is not None]
-    if not boxes:
-        return None
-    return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
-
-
-def _area(box) -> float:
-    return (box[2] - box[0]) * (box[3] - box[1]) if box else 0.0
-
-
-def _inside(inner, outer, margin: float) -> bool:
-    return (
-        inner is not None
-        and outer is not None
-        and inner[0] >= outer[0] - margin
-        and inner[1] >= outer[1] - margin
-        and inner[2] <= outer[2] + margin
-        and inner[3] <= outer[3] + margin
-    )
+    return info, _plan_products(building, storey_entities)
 
 
 def _same_origin(a: BuildingInfo, b: BuildingInfo, tol: float) -> bool:
@@ -202,45 +173,120 @@ def _same_origin(a: BuildingInfo, b: BuildingInfo, tol: float) -> bool:
     return abs(a.origin_x - b.origin_x) <= tol and abs(a.origin_y - b.origin_y) <= tol and turn <= 0.01
 
 
-def _group_blocks(buildings: list[BuildingInfo], tol: float, margin: float) -> list[list[BuildingInfo]]:
-    """Split buildings into blocks.
+def _populated_levels(info: BuildingInfo) -> int:
+    return sum(1 for s in info.storeys if s.element_count) + (1 if info.direct_element_count else 0)
 
-    1. Shared link origin: Revit writes every copy of a nested link with the plan
-       origin (XY + rotation) of the block model it is linked into.
-    2. Plan boundary: a group whose footprint lies inside the boundary of a group
-       with more storeys joins that block (catches links placed with their own origin).
-    """
-    groups: list[list[BuildingInfo]] = []
-    for info in buildings:
-        group = next((g for g in groups if _same_origin(g[0], info, tol)), None)
-        if group is None:
-            groups.append([info])
-        else:
-            group.append(info)
-            info.block_reason = "shares the block's link origin"
 
-    merged = True
-    while merged:
-        merged = False
-        for small in sorted(groups, key=lambda g: len(_pick_master(g).storeys)):
-            small_master = _pick_master(small)
-            footprint = _union(b.footprint for b in small)
-            hosts = [
-                g for g in groups
-                if g is not small
-                and len(_pick_master(g).storeys) > len(small_master.storeys)
-                and _inside(footprint, _union(b.footprint for b in g), margin)
-            ]
-            if not hosts:
+class _Grouping:
+    """Assigns every building to a block (the top-most building that contains it)."""
+
+    def __init__(self, buildings, hulls, options: RepairOptions, scale: float, tol: float):
+        self.buildings = buildings
+        self.by_id = {b.step_id: b for b in buildings}
+        self.hulls = hulls  # building id -> list of plan hulls
+        self.options = options
+        self.tol = tol
+        self.cell = 0.5 / scale
+        self.close = options.boundary_close_m / scale
+        self.margin = options.boundary_margin_m / scale
+        self._boundaries: dict[int, object] = {}
+        self.host: dict[int, int] = {}
+        self.notes: list[str] = []
+        self.ambiguous: dict[int, list[int]] = {}
+
+    def boundary(self, building_id: int):
+        if building_id not in self._boundaries:
+            self._boundaries[building_id] = build_boundary(
+                self.hulls.get(building_id, []), self.cell, self.close, self.margin
+            )
+        return self._boundaries[building_id]
+
+    def root(self, building_id: int) -> int:
+        while building_id in self.host:
+            building_id = self.host[building_id]
+        return building_id
+
+    def centres(self, building_id: int) -> np.ndarray:
+        hulls = self.hulls.get(building_id, [])
+        return np.array([h.mean(axis=0) for h in hulls]) if hulls else np.zeros((0, 2))
+
+    def run(self) -> None:
+        self._by_geometry()
+        self._by_origin()
+        for building_id, roots in self.ambiguous.items():
+            self.notes.append(
+                f"Building #{building_id} shares its link origin with several blocks "
+                f"({', '.join('#' + str(r) for r in roots)}) and its geometry fits none; left as its own block."
+            )
+
+    def _by_geometry(self) -> None:
+        ratio = self.options.containment_ratio
+        for b in self.buildings:
+            centres = self.centres(b.step_id)
+            if not len(centres):
                 continue
-            host = min(hosts, key=lambda g: _area(_union(b.footprint for b in g)))
-            for info in small:
-                info.block_reason = "inside the block's plan boundary"
-            host.extend(small)
-            groups.remove(small)
-            merged = True
-            break
-    return groups
+            scored = []
+            for h in self.buildings:
+                if len(h.storeys) <= len(b.storeys):
+                    continue  # a block always has more storeys than the parts linked into it
+                boundary = self.boundary(h.step_id)
+                if boundary is None:
+                    continue
+                share = boundary.contains(centres)
+                if share >= ratio:
+                    scored.append((share, boundary.area, h))
+            if not scored:
+                continue
+            best = max(s[0] for s in scored)
+            share, _, host = min((s for s in scored if s[0] >= best - 0.1), key=lambda s: s[1])
+            self.host[b.step_id] = host.step_id
+            b.block_reason = f"{share:.0%} of its elements inside the plan boundary of #{host.step_id}"
+
+    def _by_origin(self) -> None:
+        changed = True
+        while changed:
+            changed = False
+            hosts = set(self.host.values())
+            for b in self.buildings:
+                if b.step_id in self.host or b.step_id in hosts:
+                    continue  # placed already, or a block that holds branches inside its boundary
+                twins = [s for s in self.buildings if s is not b and _same_origin(s, b, self.tol)]
+                # 1. a stacked copy of a branch that is already placed follows it
+                roots = {
+                    self.root(s.step_id): s
+                    for s in twins
+                    if s.step_id in self.host and len(s.storeys) == len(b.storeys)
+                    and self.root(s.step_id) != b.step_id
+                }
+                reason = "same link origin as its copy #{}"
+                if not roots:
+                    # 2. a partial-height branch linked at a block's origin joins that block
+                    roots = {
+                        self.root(s.step_id): s
+                        for s in twins
+                        if len(s.storeys) > len(b.storeys)
+                        and _populated_levels(b) <= max(1, len(s.storeys) // 2)
+                        and self.root(s.step_id) != b.step_id
+                    }
+                    reason = "partial-height branch at the link origin of #{}"
+                if len(roots) > 1 and not b.total_elements:
+                    # an empty copy moves nothing, so any of its twins' blocks will do
+                    roots = dict([min(roots.items())])
+                    reason = "empty copy at the link origin of #{}"
+                if len(roots) == 1:
+                    root, via = next(iter(roots.items()))
+                    self.host[b.step_id] = root
+                    b.block_reason = reason.format(via.step_id)
+                    self.ambiguous.pop(b.step_id, None)
+                    changed = True
+                elif len(roots) > 1:
+                    self.ambiguous[b.step_id] = sorted(roots)
+
+    def groups(self) -> list[list[BuildingInfo]]:
+        members: dict[int, list[BuildingInfo]] = {}
+        for b in self.buildings:
+            members.setdefault(self.root(b.step_id), []).append(b)
+        return [[self.by_id[r]] + [b for b in group if b.step_id != r] for r, group in members.items()]
 
 
 # ---------------------------------------------------------------- analysis
@@ -250,6 +296,7 @@ def analyze(
     model_or_path: Union[str, ifcopenshell.file],
     options: Optional[RepairOptions] = None,
     path: str = "",
+    known_plan: Optional[PlanData] = None,
 ) -> DetectionReport:
     options = options or RepairOptions()
     if isinstance(model_or_path, str):
@@ -260,8 +307,8 @@ def analyze(
 
     scale = ifcopenshell.util.unit.calculate_unit_scale(model)
     tol = options.tolerance_m / scale
-    margin = options.boundary_margin_m / scale
-    buildings = [_building_info(b) for b in model.by_type("IfcBuilding")]
+    infos = [_building_info(b) for b in model.by_type("IfcBuilding")]
+    buildings = [info for info, _ in infos]
 
     report = DetectionReport(
         path=path,
@@ -276,6 +323,7 @@ def analyze(
         master_building_id=None,
         master_storeys=[],
     )
+    report.plan_products = {b.step_id: ids for b, ids in infos}  # for the plan drawing; not serialised
     if not buildings:
         report.warnings.append("No IfcBuilding found.")
         return report
@@ -293,27 +341,45 @@ def analyze(
             b.block_reason = "single-block mode (master chosen by user)"
         groups = [[forced] + others]
     else:
-        groups = _group_blocks(buildings, tol, margin)
+        hulls: dict[int, list] = {}
+        if options.use_geometry and len(buildings) > 1:
+            products = {b.step_id: ids for b, ids in infos}
+            plan = collect_plan_data(model, [i for ids in products.values() for i in ids], scale, path, known_plan)
+            if plan.engine_error:
+                report.warnings.append(
+                    f"Geometry engine unavailable ({plan.engine_error}); blocks found from link origins only."
+                )
+            hulls = {b: [plan.element_hulls[i] for i in ids if i in plan.element_hulls] for b, ids in products.items()}
+            for b in buildings:
+                if hulls.get(b.step_id):
+                    pts = np.vstack(hulls[b.step_id])
+                    b.footprint = (float(pts[:, 0].min()), float(pts[:, 1].min()),
+                                   float(pts[:, 0].max()), float(pts[:, 1].max()))
+        grouping = _Grouping(buildings, hulls, options, scale, tol)
+        grouping.run()
+        report.warnings.extend(grouping.notes)
+        groups = grouping.groups()
 
     for group in groups:
-        master = forced or _pick_master(group)
+        master = group[0]
         master.role = "master"
         master.block_id = master.step_id
         master.reason = f"{len(master.storeys)} storeys"
         master.block_reason = "block master"
+        boxes = [b.footprint for b in group if b.footprint]
         block = BlockInfo(
             master_id=master.step_id,
             master_name=master.name,
             master_global_id=master.global_id,
             member_ids=[b.step_id for b in group],
             storeys=list(master.storeys),
-            boundary=_union(b.footprint for b in group),
+            boundary=(
+                min(x[0] for x in boxes), min(x[1] for x in boxes), max(x[2] for x in boxes), max(x[3] for x in boxes)
+            ) if boxes else None,
         )
         report.blocks.append(block)
         report.master_storeys.extend(master.storeys)
-        for info in group:
-            if info is master:
-                continue
+        for info in group[1:]:
             info.block_id = master.step_id
             if not master.storeys:
                 info.role = "other"
@@ -333,7 +399,7 @@ def analyze(
                 "(not in a storey); left unchanged."
             )
 
-    report.blocks.sort(key=lambda k: -len(k.storeys))
+    report.blocks.sort(key=lambda k: (-len(k.member_ids), -len(k.storeys), k.master_id))
     report.master_building_id = report.blocks[0].master_id
     _plan_linked_sites(model, report)
 

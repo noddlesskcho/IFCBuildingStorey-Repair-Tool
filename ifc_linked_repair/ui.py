@@ -30,7 +30,7 @@ class App(ttk.Frame):
         self.path_var = tk.StringVar()
         self.master_var = tk.StringVar(value=AUTO)
         self.mode_var = tk.StringVar(value=MODE_STOREY)
-        self.tol_var = tk.StringVar(value="0.05")
+        self.tol_var = tk.StringVar(value="0.3")
         self.remove_var = tk.BooleanVar(value=True)
         self.rebase_var = tk.BooleanVar(value=True)
         self.show_empty_var = tk.BooleanVar(value=False)
@@ -201,7 +201,7 @@ class App(ttk.Frame):
         options = self._repair_options()
         if options is None:
             return
-        self._run(f"Analyzing {os.path.basename(path)}...", lambda: analyze(path, options), self._analyzed)
+        self._run(f"Analyzing {os.path.basename(path)} (reading geometry for block boundaries)...", lambda: analyze(path, options), self._analyzed)
 
     def _analyzed(self, report: DetectionReport | None, error) -> None:
         if error is not None:
@@ -316,6 +316,7 @@ class App(ttk.Frame):
         lines = [f"Input:  {result.input_path}", f"Output: {result.output_path or '(not written)'}"]
         if result.output_path:
             lines += [f"Change log: {result.changelog_csv}", f"Report: {result.report_md}",
+                      f"Block plan: {result.block_plan_svg or '(no geometry)'}",
                       f"Elements reassigned: {len(result.report.moves)}",
                       f"Placements rebased: {len(result.rebased_ids)}",
                       f"Spatial elements removed: {len(result.removed_spatial)}"]

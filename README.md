@@ -70,18 +70,22 @@ python -m ifc_linked_repair repair "Master File.ifc" -o "Master File_fixed.ifc"
 The `repair` command takes these options:
 
 - `--mode storey|branch`
-- `--tolerance 0.05` (metres)
+- `--tolerance 0.3`: elevation match tolerance in metres
+- `--containment 0.6`: share of a building's elements that must lie inside a block boundary
+- `--boundary-margin 1.0`: margin in metres around a block boundary
+- `--no-geometry`: skip tessellation and find blocks from link origins only
 - `--master-id N`
 - `--include ID ...`
 - `--keep-branches`
 - `--no-rebase`
 - `--force`: allows the command to replace an existing *output* file. The input file is never replaced.
 
-Each export writes three files:
+Each export writes these files:
 
 - `<name>.ifc`: the fixed model
 - `<name>.changelog.csv`: one row per reassigned element, with GUID, class, source container, target storey and whether its placement was rebased
 - `<name>.report.md`: summary, mapping table, removed spatial elements and verification results
+- `<name>.blocks.svg`: plan view of every element coloured by its assigned block. Open it in a browser to confirm that each typical unit sits inside its own block.
 
 ## How the repair works
 
@@ -89,7 +93,8 @@ Code layout (the core logic has no UI dependency):
 
 | Module | Role |
 |---|---|
-| `detection.py` | Reads the spatial tree, resolves absolute Z values, picks the master building, classifies linked branches and builds the plan |
+| `detection.py` | Reads the spatial tree, resolves absolute Z values, groups buildings into blocks, classifies linked branches and builds the plan |
+| `footprint.py` | Tessellates elements and builds each block's plan boundary |
 | `repair.py` | Applies the plan to the model in memory and writes the output safely |
 | `verify.py` | Compares the original and repaired files |
 | `reporting.py` | Writes the text summary, the CSV change log and the Markdown report |
@@ -104,28 +109,47 @@ Code layout (the core logic has no UI dependency):
 2. Resolve the absolute Z of every building and storey from its full
    `IfcLocalPlacement` chain. The `Elevation` attribute is shown for
    information only, because Revit writes it relative to the linked building.
-3. Split the buildings into **blocks**, so one file can hold several blocks
-   (for example a site model that links Block A and Block B, and each block
-   links its typical units):
-   - **Shared link origin.** Revit writes every copy of a nested link with
-     the plan origin (XY and rotation) of the block model it is linked into.
-     Buildings with the same origin form one block.
-   - **Plan boundary.** Each block has a plan boundary: the XY extent of
-     everything its buildings contain. A group whose footprint lies inside the
-     boundary of a block with more storeys joins that block. The default
-     margin is 1 m (`--boundary-margin`). This catches links that were placed
-     with their own origin.
-   - In each block, the master is the building with the most storeys. Ties go
-     first to the building with the most contained elements, then to the
-     earliest building in the file. A building that holds only site elements,
-     such as boundary walls, forms its own block and receives nothing.
+3. Split the buildings into **blocks**, so one file can hold any number of
+   blocks of any size or shape. Examples: a site model that links Block A and
+   Block B, or three tower models on one podium, each linking its typical
+   units.
+   - **Block boundary from real geometry.** The tool tessellates every
+     element in world coordinates, with openings ignored. Each element is
+     reduced to the convex hull of its plan outline. A building's boundary is
+     built from these hulls in four steps:
+     1. Rasterise the hulls onto a 0.5 m plan grid.
+     2. Bridge gaps up to 3 m.
+     3. Fill holes.
+     4. Grow the result by 1 m (`--boundary-margin`).
+
+     The boundary follows the real outline: L shapes, crosses, rotated or
+     adjacent towers. It is not a bounding box. Element placement points are
+     not used, because Revit often writes them at the link origin, far from
+     the element.
+   - **Containment.** A building joins the smallest host that has more
+     storeys and holds at least 60% (`--containment`) of its element centres
+     inside the host's boundary. Chains resolve to the top block, so a unit
+     inside a unit inside a tower lands in the tower. A podium or site model
+     with fewer storeys never absorbs a tower.
+   - **Link origin fallback.** This rule applies only to buildings that the
+     geometry could not place. A stacked copy follows its sibling that is
+     already placed. A partial-height branch, populated on at most half of a
+     taller building's storeys and linked at that building's origin, joins
+     that building. Example: Site Master, where the block model has no
+     geometry of its own. A building that already holds branches is a block
+     and is never merged by origin. This keeps several tower models that
+     share project coordinates apart.
+   - The top building of each group is the block master. Any other building
+     forms its own block and receives nothing, for example a site model with
+     boundary walls.
    - `--master-id`, or choosing a building in the UI, switches to
      single-block mode, where every other building is a branch of that one.
 4. In each block, every other building is a linked branch. A branch is marked
    *likely linked* and included automatically when each populated container
-   sits within the tolerance (default 50 mm) of one of its own block's storey
-   elevations. A branch that does not align is excluded and reported. You can
-   include it manually.
+   sits within the tolerance (default 300 mm) of one of its own block's storey
+   elevations. Revit link levels often sit a finish thickness (50 to 100 mm)
+   off the host storey. A branch that does not align is excluded and
+   reported. You can include it manually.
 5. Map each container to the nearest storey of its own block by absolute Z.
    - In `storey` mode (the default), each internal linked storey is matched
      separately.
@@ -192,6 +216,9 @@ python -m pytest -q
 
 ## Limits
 
+- Detection tessellates the whole model once. On a 95 MB model with 417
+  buildings, analysis takes about 35 s and export with full verification
+  takes about 3 minutes.
 - Only `IfcBuilding` branches are treated as links. Linked models exported
   into the master storeys directly need no repair.
 - A linked element that spans several storeys, such as a stair core, moves
