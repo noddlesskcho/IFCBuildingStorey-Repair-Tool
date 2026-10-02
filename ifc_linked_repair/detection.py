@@ -6,6 +6,7 @@ on the spatial relationship hierarchy and on absolute placement Z values.
 
 from __future__ import annotations
 
+import math
 from typing import Iterable, Optional, Union
 
 import ifcopenshell
@@ -14,6 +15,7 @@ import ifcopenshell.util.unit
 
 from .model import (
     MODE_BRANCH,
+    BlockInfo,
     BuildingInfo,
     DetectionReport,
     ElementMove,
@@ -121,13 +123,33 @@ def _storey_info(storey, building_z: float) -> StoreyInfo:
     )
 
 
+def _footprint(containers) -> Optional[tuple[float, float, float, float]]:
+    """Plan (XY) bounding box of the placement origins of everything held by the containers."""
+    xs, ys = [], []
+    for container in containers:
+        for element, relation in spatial_contents(container):
+            if relation == "referenced":
+                continue
+            matrix = absolute_matrix(element)
+            if matrix is not None:
+                xs.append(float(matrix[0][3]))
+                ys.append(float(matrix[1][3]))
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def _building_info(building) -> BuildingInfo:
     site = site_of(building)
-    z = absolute_z(building)
-    if z is None:
-        z = absolute_z(site) if site is not None else 0.0
-        z = z or 0.0
-    storeys = sorted((_storey_info(s, z) for s in storeys_of(building)), key=lambda s: s.z)
+    matrix = absolute_matrix(building)
+    if matrix is None:
+        z = (absolute_z(site) if site is not None else 0.0) or 0.0
+        ox = oy = rot = 0.0
+    else:
+        z, ox, oy = float(matrix[2][3]), float(matrix[0][3]), float(matrix[1][3])
+        rot = math.degrees(math.atan2(matrix[1][0], matrix[0][0]))
+    storey_entities = storeys_of(building)
+    storeys = sorted((_storey_info(s, z) for s in storey_entities), key=lambda s: s.z)
     return BuildingInfo(
         step_id=building.id(),
         global_id=building.GlobalId,
@@ -137,6 +159,10 @@ def _building_info(building) -> BuildingInfo:
         z=z,
         storeys=storeys,
         direct_element_count=len(spatial_contents(building)),
+        origin_x=ox,
+        origin_y=oy,
+        rotation_deg=rot,
+        footprint=_footprint([building] + storey_entities),
     )
 
 
@@ -147,6 +173,74 @@ def _pick_master(buildings: list[BuildingInfo]) -> BuildingInfo:
         buildings,
         key=lambda b: (len(b.storeys), sum(s.element_count for s in b.storeys), -b.step_id),
     )
+
+
+def _union(boxes) -> Optional[tuple[float, float, float, float]]:
+    boxes = [b for b in boxes if b is not None]
+    if not boxes:
+        return None
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _area(box) -> float:
+    return (box[2] - box[0]) * (box[3] - box[1]) if box else 0.0
+
+
+def _inside(inner, outer, margin: float) -> bool:
+    return (
+        inner is not None
+        and outer is not None
+        and inner[0] >= outer[0] - margin
+        and inner[1] >= outer[1] - margin
+        and inner[2] <= outer[2] + margin
+        and inner[3] <= outer[3] + margin
+    )
+
+
+def _same_origin(a: BuildingInfo, b: BuildingInfo, tol: float) -> bool:
+    turn = abs((a.rotation_deg - b.rotation_deg + 180.0) % 360.0 - 180.0)
+    return abs(a.origin_x - b.origin_x) <= tol and abs(a.origin_y - b.origin_y) <= tol and turn <= 0.01
+
+
+def _group_blocks(buildings: list[BuildingInfo], tol: float, margin: float) -> list[list[BuildingInfo]]:
+    """Split buildings into blocks.
+
+    1. Shared link origin: Revit writes every copy of a nested link with the plan
+       origin (XY + rotation) of the block model it is linked into.
+    2. Plan boundary: a group whose footprint lies inside the boundary of a group
+       with more storeys joins that block (catches links placed with their own origin).
+    """
+    groups: list[list[BuildingInfo]] = []
+    for info in buildings:
+        group = next((g for g in groups if _same_origin(g[0], info, tol)), None)
+        if group is None:
+            groups.append([info])
+        else:
+            group.append(info)
+            info.block_reason = "shares the block's link origin"
+
+    merged = True
+    while merged:
+        merged = False
+        for small in sorted(groups, key=lambda g: len(_pick_master(g).storeys)):
+            small_master = _pick_master(small)
+            footprint = _union(b.footprint for b in small)
+            hosts = [
+                g for g in groups
+                if g is not small
+                and len(_pick_master(g).storeys) > len(small_master.storeys)
+                and _inside(footprint, _union(b.footprint for b in g), margin)
+            ]
+            if not hosts:
+                continue
+            host = min(hosts, key=lambda g: _area(_union(b.footprint for b in g)))
+            for info in small:
+                info.block_reason = "inside the block's plan boundary"
+            host.extend(small)
+            groups.remove(small)
+            merged = True
+            break
+    return groups
 
 
 # ---------------------------------------------------------------- analysis
@@ -166,6 +260,7 @@ def analyze(
 
     scale = ifcopenshell.util.unit.calculate_unit_scale(model)
     tol = options.tolerance_m / scale
+    margin = options.boundary_margin_m / scale
     buildings = [_building_info(b) for b in model.by_type("IfcBuilding")]
 
     report = DetectionReport(
@@ -185,54 +280,74 @@ def analyze(
         report.warnings.append("No IfcBuilding found.")
         return report
 
-    master = None
+    forced = None
     if options.master_building_id is not None:
-        master = next((b for b in buildings if b.step_id == options.master_building_id), None)
-        if master is None:
-            report.warnings.append(f"Requested master building #{options.master_building_id} not found; auto-selected.")
-    master = master or _pick_master(buildings)
-    master.role = "master"
-    master.reason = f"{len(master.storeys)} storeys"
-    report.master_building_id = master.step_id
-    report.master_storeys = list(master.storeys)
+        forced = next((b for b in buildings if b.step_id == options.master_building_id), None)
+        if forced is None:
+            report.warnings.append(
+                f"Requested master building #{options.master_building_id} not found; auto-detected blocks."
+            )
+    if forced is not None:
+        others = [b for b in buildings if b is not forced]
+        for b in others:
+            b.block_reason = "single-block mode (master chosen by user)"
+        groups = [[forced] + others]
+    else:
+        groups = _group_blocks(buildings, tol, margin)
 
-    if not master.storeys:
-        report.warnings.append("Master building has no storeys; cannot map linked branches.")
-        for b in buildings:
-            if b is not master:
-                b.role = "other"
-        return report
-
-    master_site_ids = {master.site_id}
-
-    for info in buildings:
-        if info is master:
-            continue
-        info.role = "linked"
-        _classify(info, report.master_storeys, tol, options.mode)
-        if options.include_building_ids is None:
-            info.included = info.likely_linked
-        else:
-            info.included = info.step_id in options.include_building_ids
-        if info.included:
-            _plan_building(model, info, report, tol, options.mode)
-
-    _plan_linked_sites(model, report, master, master_site_ids)
-
-    if master.direct_element_count:
-        report.warnings.append(
-            f"Master building holds {master.direct_element_count} element(s) directly (not in a storey); left unchanged."
+    for group in groups:
+        master = forced or _pick_master(group)
+        master.role = "master"
+        master.block_id = master.step_id
+        master.reason = f"{len(master.storeys)} storeys"
+        master.block_reason = "block master"
+        block = BlockInfo(
+            master_id=master.step_id,
+            master_name=master.name,
+            master_global_id=master.global_id,
+            member_ids=[b.step_id for b in group],
+            storeys=list(master.storeys),
+            boundary=_union(b.footprint for b in group),
         )
-    off = [m for m in report.mappings if m.element_count and not m.within_tolerance]
-    for m in off:
-        report.warnings.append(
-            f"#{m.source_id} '{m.source_name}' (building #{m.building_id}) Z={m.source_z:.1f} is "
-            f"{m.delta:.1f} {report.length_unit} from nearest master storey '{m.target_name}'. Review before export."
-        )
+        report.blocks.append(block)
+        report.master_storeys.extend(master.storeys)
+        for info in group:
+            if info is master:
+                continue
+            info.block_id = master.step_id
+            if not master.storeys:
+                info.role = "other"
+                info.reason = "block master has no storeys"
+                continue
+            info.role = "linked"
+            _classify(info, block.storeys, tol, options.mode)
+            if options.include_building_ids is None:
+                info.included = info.likely_linked
+            else:
+                info.included = info.step_id in options.include_building_ids
+            if info.included:
+                _plan_building(model, info, master, report, tol, options.mode)
+        if master.direct_element_count:
+            report.warnings.append(
+                f"Block master #{master.step_id} holds {master.direct_element_count} element(s) directly "
+                "(not in a storey); left unchanged."
+            )
+
+    report.blocks.sort(key=lambda k: -len(k.storeys))
+    report.master_building_id = report.blocks[0].master_id
+    _plan_linked_sites(model, report)
+
+    for m in report.mappings:
+        if m.element_count and not m.within_tolerance:
+            report.warnings.append(
+                f"#{m.source_id} '{m.source_name}' (building #{m.building_id}) Z={m.source_z:.1f} is "
+                f"{m.delta:.1f} {report.length_unit} from nearest master storey '{m.target_name}'. Review before export."
+            )
     for b in report.linked_buildings:
         if not b.included:
             report.warnings.append(
-                f"Building #{b.step_id} '{b.name}' not included automatically: {b.reason}. Include manually if it is a linked model."
+                f"Building #{b.step_id} '{b.name}' not included automatically: {b.reason}. "
+                "Include manually if it is a linked model."
             )
     return report
 
@@ -257,17 +372,19 @@ def _classify(info: BuildingInfo, master_storeys: list[StoreyInfo], tol: float, 
     worst = max(abs(_nearest(master_storeys, z).z - z) for z in zs)
     info.likely_linked = worst <= tol
     info.reason = (
-        "storey elevations align with master storeys"
+        "storey elevations align with block storeys"
         if info.likely_linked
         else f"elevation offset {worst:.1f} exceeds tolerance {tol:.1f}"
     )
 
 
-def _plan_building(model, info: BuildingInfo, report: DetectionReport, tol: float, mode: str) -> None:
-    branch_target = _nearest(report.master_storeys, info.z)
+def _plan_building(
+    model, info: BuildingInfo, master: BuildingInfo, report: DetectionReport, tol: float, mode: str
+) -> None:
+    branch_target = _nearest(master.storeys, info.z)
     for step_id, kind, name, z, count in _sources(info):
         match_z = info.z if mode == MODE_BRANCH else z
-        target = branch_target if mode == MODE_BRANCH else _nearest(report.master_storeys, z)
+        target = branch_target if mode == MODE_BRANCH else _nearest(master.storeys, z)
         delta = abs(target.z - match_z)
         source_entity = model.by_id(step_id)
         mapping = SourceMapping(
@@ -282,6 +399,8 @@ def _plan_building(model, info: BuildingInfo, report: DetectionReport, tol: floa
             target_name=target.name,
             target_global_id=target.global_id,
             target_z=target.z,
+            target_building_id=master.step_id,
+            target_building_name=master.name,
             delta=delta,
             element_count=count,
             within_tolerance=delta <= tol,
@@ -290,11 +409,10 @@ def _plan_building(model, info: BuildingInfo, report: DetectionReport, tol: floa
         _add_moves(report, mapping, spatial_contents(source_entity))
 
 
-def _plan_linked_sites(model, report: DetectionReport, master: BuildingInfo, master_site_ids: set) -> None:
-    """Sites that only carry included linked buildings: move their own contents to the master site."""
-    if master.site_id is None:
-        return
-    master_site = model.by_id(master.site_id)
+def _plan_linked_sites(model, report: DetectionReport) -> None:
+    """Sites that only carry included linked buildings: move their contents to the block master's site."""
+    by_id = {b.step_id: b for b in report.buildings}
+    master_site_ids = {b.site_id for b in report.master_buildings}
     included = {b.step_id for b in report.included_buildings}
     for site in model.by_type("IfcSite"):
         if site.id() in master_site_ids:
@@ -305,7 +423,10 @@ def _plan_linked_sites(model, report: DetectionReport, master: BuildingInfo, mas
         contents = spatial_contents(site)
         if not contents:
             continue
-        z = absolute_z(site) or 0.0
+        master = by_id[by_id[buildings[0].id()].block_id]
+        if master.site_id is None:
+            continue
+        master_site = model.by_id(master.site_id)
         mapping = SourceMapping(
             building_id=buildings[0].id(),
             building_name=buildings[0].Name or "",
@@ -313,11 +434,13 @@ def _plan_linked_sites(model, report: DetectionReport, master: BuildingInfo, mas
             source_kind="IfcSite",
             source_name=site.Name or "",
             source_global_id=site.GlobalId,
-            source_z=z,
+            source_z=absolute_z(site) or 0.0,
             target_id=master_site.id(),
             target_name=master_site.Name or "",
             target_global_id=master_site.GlobalId,
             target_z=absolute_z(master_site) or 0.0,
+            target_building_id=master.step_id,
+            target_building_name=master.name,
             delta=0.0,
             element_count=len(contents),
             within_tolerance=True,
@@ -342,5 +465,6 @@ def _add_moves(report: DetectionReport, mapping: SourceMapping, contents: Iterab
                 target_id=mapping.target_id,
                 target_name=mapping.target_name,
                 target_z=mapping.target_z,
+                target_building_id=mapping.target_building_id,
             )
         )

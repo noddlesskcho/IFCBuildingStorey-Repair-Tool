@@ -13,8 +13,12 @@ MODE_BRANCH = "branch"  # whole linked building matched by the building placemen
 class RepairOptions:
     mode: str = MODE_STOREY
     tolerance_m: float = 0.05
+    # Margin added around a block's plan boundary when testing whether a
+    # linked branch lies inside it.
+    boundary_margin_m: float = 1.0
     remove_empty_branches: bool = True
     rebase_placements: bool = True
+    # Force single-block mode: every other building is treated as a branch of this one.
     master_building_id: Optional[int] = None
     # None = include every branch detected as "likely linked".
     # A set of IfcBuilding step ids overrides the automatic choice.
@@ -41,14 +45,32 @@ class BuildingInfo:
     z: float
     storeys: list[StoreyInfo]
     direct_element_count: int
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+    rotation_deg: float = 0.0
+    footprint: Optional[tuple[float, float, float, float]] = None  # min x, min y, max x, max y
     role: str = "unknown"  # master | linked | other
+    block_id: Optional[int] = None  # step id of the block (master) building
     likely_linked: bool = False
     included: bool = False
     reason: str = ""
+    block_reason: str = ""
 
     @property
     def total_elements(self) -> int:
         return self.direct_element_count + sum(s.element_count for s in self.storeys)
+
+
+@dataclass
+class BlockInfo:
+    """One block: a master building plus the linked branches that belong to it."""
+
+    master_id: int
+    master_name: str
+    master_global_id: str
+    member_ids: list[int]
+    storeys: list[StoreyInfo]
+    boundary: Optional[tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -66,6 +88,8 @@ class SourceMapping:
     target_name: str
     target_global_id: str
     target_z: float
+    target_building_id: int
+    target_building_name: str
     delta: float
     element_count: int
     within_tolerance: bool
@@ -85,6 +109,7 @@ class ElementMove:
     target_id: int
     target_name: str
     target_z: float
+    target_building_id: int = 0
 
 
 @dataclass
@@ -100,6 +125,7 @@ class DetectionReport:
     buildings: list[BuildingInfo]
     master_building_id: Optional[int]
     master_storeys: list[StoreyInfo]
+    blocks: list[BlockInfo] = field(default_factory=list)
     mappings: list[SourceMapping] = field(default_factory=list)
     moves: list[ElementMove] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -107,6 +133,13 @@ class DetectionReport:
     @property
     def master_building(self) -> Optional[BuildingInfo]:
         return next((b for b in self.buildings if b.step_id == self.master_building_id), None)
+
+    @property
+    def master_buildings(self) -> list[BuildingInfo]:
+        return [b for b in self.buildings if b.role == "master"]
+
+    def block_of(self, building_id: int) -> Optional[BlockInfo]:
+        return next((k for k in self.blocks if building_id in k.member_ids), None)
 
     @property
     def linked_buildings(self) -> list[BuildingInfo]:

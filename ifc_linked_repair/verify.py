@@ -226,7 +226,8 @@ def verify(
     # 7. re-detection on the output
     included = {b.step_id for b in report.included_buildings}
     again = analyze(repaired, RepairOptions(mode=options.mode, tolerance_m=options.tolerance_m,
-                                            master_building_id=report.master_building_id,
+                                            boundary_margin_m=options.boundary_margin_m,
+                                            master_building_id=options.master_building_id,
                                             include_building_ids=included))
     result.checks.append(
         Check(

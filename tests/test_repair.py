@@ -7,7 +7,7 @@ from ifc_linked_repair.detection import analyze, spatial_contents
 from ifc_linked_repair.model import MODE_BRANCH, RepairOptions
 from ifc_linked_repair.repair import OutputSafetyError, repair_file
 
-from .synthetic import build
+from .synthetic import build, build_multi_block
 
 OFFSETS = (0.0, 3600.0, 7200.0, 10800.0)
 EXPECTED = {0.0: "1st Storey", 3600.0: "2nd Storey", 7200.0: "3rd Storey", 10800.0: "4th Storey"}
@@ -129,3 +129,40 @@ def test_never_overwrites_input(tmp_path):
     with pytest.raises(OutputSafetyError):
         repair_file(path, str(existing))
     assert existing.read_text() == "x"
+
+
+@pytest.mark.parametrize("unit_own_origin", [False, True])
+def test_multi_block_units_stay_in_their_block(tmp_path, unit_own_origin):
+    model, info = build_multi_block(unit_own_origin=unit_own_origin)
+    path = _write(tmp_path, model)
+    report = analyze(path)
+    assert len(report.blocks) == 3
+    for label, block in info["blocks"].items():
+        block_id = block["building"].id()
+        storey_by_z = {round(s.z): s.name for s in report.block_of(block_id).storeys}
+        for unit in block["units"]:
+            b = next(x for x in report.buildings if x.step_id == unit["building"].id())
+            assert b.block_id == block_id and b.included
+            expected_reason = "plan boundary" if unit_own_origin else "link origin"
+            assert expected_reason in b.block_reason
+            moves = [m for m in report.moves if m.building_id == b.step_id]
+            assert {m.target_building_id for m in moves} == {block_id}
+            assert {m.target_name for m in moves} == {storey_by_z[round(unit["z"])]}
+    # site host keeps its boundary walls and receives nothing
+    assert not any(m.target_building_id == info["host"].id() for m in report.moves)
+
+    out = str(tmp_path / "fixed.ifc")
+    result = repair_file(path, out)
+    assert result.verification.passed, [c for c in result.verification.checks if not c.passed]
+    fixed = ifcopenshell.open(out)
+    assert {b.id() for b in fixed.by_type("IfcBuilding")} == {
+        info["host"].id(), info["blocks"]["A"]["building"].id(), info["blocks"]["B"]["building"].id()
+    }
+
+
+def test_single_block_mode_override(tmp_path):
+    model, info = build_multi_block()
+    path = _write(tmp_path, model)
+    block_a = info["blocks"]["A"]["building"].id()
+    report = analyze(path, RepairOptions(master_building_id=block_a))
+    assert len(report.blocks) == 1 and report.master_building_id == block_a

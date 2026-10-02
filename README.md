@@ -104,16 +104,29 @@ Code layout (the core logic has no UI dependency):
 2. Resolve the absolute Z of every building and storey from its full
    `IfcLocalPlacement` chain. The `Elevation` attribute is shown for
    information only, because Revit writes it relative to the linked building.
-3. Pick the master building. The building with the most storeys wins. Ties go
-   first to the building with the most contained elements, then to the
-   earliest building in the file. You can override this choice in the UI or
-   with `--master-id`.
-4. Treat every other building as a linked branch. A branch is marked *likely
-   linked* and included automatically when each populated container sits
-   within the tolerance (default 50 mm) of a master storey elevation. A branch
-   that does not align, for example a genuine second building, is excluded and
-   reported. You can include it manually.
-5. Map each container to the nearest master storey by absolute Z.
+3. Split the buildings into **blocks**, so one file can hold several blocks
+   (for example a site model that links Block A and Block B, and each block
+   links its typical units):
+   - **Shared link origin.** Revit writes every copy of a nested link with
+     the plan origin (XY and rotation) of the block model it is linked into.
+     Buildings with the same origin form one block.
+   - **Plan boundary.** Each block has a plan boundary: the XY extent of
+     everything its buildings contain. A group whose footprint lies inside the
+     boundary of a block with more storeys joins that block. The default
+     margin is 1 m (`--boundary-margin`). This catches links that were placed
+     with their own origin.
+   - In each block, the master is the building with the most storeys. Ties go
+     first to the building with the most contained elements, then to the
+     earliest building in the file. A building that holds only site elements,
+     such as boundary walls, forms its own block and receives nothing.
+   - `--master-id`, or choosing a building in the UI, switches to
+     single-block mode, where every other building is a branch of that one.
+4. In each block, every other building is a linked branch. A branch is marked
+   *likely linked* and included automatically when each populated container
+   sits within the tolerance (default 50 mm) of one of its own block's storey
+   elevations. A branch that does not align is excluded and reported. You can
+   include it manually.
+5. Map each container to the nearest storey of its own block by absolute Z.
    - In `storey` mode (the default), each internal linked storey is matched
      separately.
    - In `branch` mode, the whole linked building is matched by its placement Z.

@@ -21,6 +21,7 @@ def _options(args) -> RepairOptions:
     return RepairOptions(
         mode=args.mode,
         tolerance_m=args.tolerance,
+        boundary_margin_m=args.boundary_margin,
         remove_empty_branches=not args.keep_branches,
         rebase_placements=not args.no_rebase,
         master_building_id=args.master_id,
@@ -34,7 +35,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="storey: match each linked storey by its absolute Z (default); "
                         "branch: match the whole linked building by its placement Z")
     p.add_argument("--tolerance", type=float, default=0.05, help="elevation match tolerance in metres (default 0.05)")
-    p.add_argument("--master-id", type=int, help="force master IfcBuilding step id")
+    p.add_argument("--boundary-margin", type=float, default=1.0,
+                   help="margin in metres around a block's plan boundary (default 1.0)")
+    p.add_argument("--master-id", type=int,
+                   help="single-block mode: force this IfcBuilding step id as the only master")
     p.add_argument("--include", type=int, nargs="+", metavar="ID",
                    help="IfcBuilding step ids to treat as linked (default: auto-detected)")
     p.add_argument("--keep-branches", action="store_true", help="keep empty linked spatial branches")

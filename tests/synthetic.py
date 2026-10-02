@@ -119,3 +119,66 @@ def build(linked_offsets=(), unit_level_names=("Base Level", "Top Level"), separ
         elements = _unit_contents(model, context, base, material, f"L{i}")
         info["linked"].append({"building": building, "z": z, "elements": elements})
     return model, info
+
+
+def build_multi_block(unit_own_origin=False):
+    """Site host + Block A (5 storeys) + Block B (8 storeys from Z 2000), each with linked units.
+
+    Units normally share their block's plan origin (how Revit writes nested links).
+    With unit_own_origin=True each unit gets its own origin, so only the plan boundary
+    can tie it to its block.
+    """
+    model = ifcopenshell.file(schema="IFC4")
+    project = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="Project Number")
+    length = ifcopenshell.api.unit.add_si_unit(model, unit_type="LENGTHUNIT", prefix="MILLI")
+    ifcopenshell.api.unit.assign_unit(model, units=[length])
+    context = model.createIfcGeometricRepresentationContext(
+        None, "Model", 3, 1e-5,
+        model.createIfcAxis2Placement3D(model.createIfcCartesianPoint((0.0, 0.0, 0.0)), None, None), None)
+    project.RepresentationContexts = [context]
+    material = ifcopenshell.api.material.add_material(model, name="Concrete")
+    site = _spatial(model, "IfcSite", "Default", project, _placement(model, None))
+
+    host = _spatial(model, "IfcBuilding", "Building Name", site, _placement(model, site.ObjectPlacement))
+    host_storey = _spatial(model, "IfcBuildingStorey", "Site Level", host,
+                           _placement(model, host.ObjectPlacement), Elevation=0.0)
+    _spatial(model, "IfcBuildingStorey", "Site Level 2", host,
+             _placement(model, host.ObjectPlacement, z=3600.0), Elevation=3600.0)
+    fence = []
+    for x, y in ((-40000.0, -30000.0), (40000.0, -30000.0), (40000.0, 35000.0), (-40000.0, 35000.0)):
+        wall = ifcopenshell.api.root.create_entity(model, ifc_class="IfcWall", name="Boundary wall")
+        wall.ObjectPlacement = _placement(model, host_storey.ObjectPlacement, x, y)
+        fence.append(wall)
+    ifcopenshell.api.spatial.assign_container(model, products=fence, relating_structure=host_storey)
+
+    info = {"host": host, "blocks": {}}
+    for label, (ox, oy, base_z, count, unit_zs) in {
+        "A": (-20000.0, -10000.0, 0.0, 5, (0.0, 3600.0, 7200.0, 10800.0)),
+        "B": (30000.0, 20000.0, 2000.0, 8, (2000.0, 5600.0, 9200.0)),
+    }.items():
+        block = _spatial(model, "IfcBuilding", "Building Name", site,
+                         _placement(model, site.ObjectPlacement, ox, oy, base_z))
+        storeys = [
+            _spatial(model, "IfcBuildingStorey", f"Level {n + 1} Block {label}", block,
+                     _placement(model, block.ObjectPlacement, z=3600.0 * n), Elevation=3600.0 * n)
+            for n in range(count)
+        ]
+        corners = []
+        for cx, cy in ((-15000.0, -15000.0), (15000.0, -15000.0), (15000.0, 15000.0), (-15000.0, 15000.0)):
+            column = ifcopenshell.api.root.create_entity(model, ifc_class="IfcColumn", name=f"Column {label}")
+            column.ObjectPlacement = _placement(model, storeys[0].ObjectPlacement, cx, cy)
+            corners.append(column)
+        ifcopenshell.api.spatial.assign_container(model, products=corners, relating_structure=storeys[0])
+        units = []
+        for i, z in enumerate(unit_zs):
+            ux, uy = (ox + 2500.0 * (i + 1), oy - 3000.0) if unit_own_origin else (ox, oy)
+            unit = _spatial(model, "IfcBuilding", "Building Name", site,
+                            _placement(model, site.ObjectPlacement, ux, uy, z))
+            base = _spatial(model, "IfcBuildingStorey", "Base Level", unit,
+                            _placement(model, unit.ObjectPlacement), Elevation=0.0)
+            _spatial(model, "IfcBuildingStorey", "Top Level", unit,
+                     _placement(model, unit.ObjectPlacement, z=3600.0), Elevation=3600.0)
+            elements = _unit_contents(model, context, base, material, f"{label}{i}")
+            units.append({"building": unit, "z": z, "elements": elements})
+        info["blocks"][label] = {"building": block, "storeys": storeys, "units": units}
+    return model, info

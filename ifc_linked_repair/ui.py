@@ -14,7 +14,7 @@ from .model import MODE_BRANCH, MODE_STOREY, DetectionReport, RepairOptions
 from .repair import OutputSafetyError, check_output_path, default_output_path, repair_file
 from .reporting import format_detection
 
-AUTO = "Auto-detect"
+AUTO = "Auto-detect blocks"
 
 
 class App(ttk.Frame):
@@ -69,15 +69,15 @@ class App(ttk.Frame):
         self.summary = self._text_tab("Detection report")
         self.buildings = self._tree_tab(
             "Buildings",
-            [("role", 70), ("include", 70), ("id", 70), ("name", 160), ("site", 140), ("z", 90),
-             ("storeys", 70), ("elements", 80), ("reason", 320)],
+            [("role", 70), ("include", 70), ("id", 70), ("guid", 190), ("block", 190), ("z", 90),
+             ("storeys", 70), ("elements", 80), ("reason", 420)],
             hint="Double-click a linked building to include / exclude it, then the plan is recalculated.",
         )
         self.buildings.bind("<Double-1>", self._toggle_include)
         self.mapping = self._tree_tab(
             "Proposed changes",
-            [("building", 170), ("source", 220), ("source_z", 90), ("target", 160), ("target_z", 90),
-             ("delta", 70), ("elements", 80), ("status", 80)],
+            [("building", 170), ("source", 220), ("source_z", 90), ("block", 190), ("target", 160),
+             ("target_z", 90), ("delta", 70), ("elements", 80), ("status", 80)],
             hint="Source labels are display names only; matching uses absolute Z.",
         )
         ttk.Checkbutton(
@@ -86,7 +86,8 @@ class App(ttk.Frame):
         ).pack(anchor="w")
         self.elements = self._tree_tab(
             "Element preview",
-            [("id", 70), ("guid", 190), ("class", 170), ("name", 260), ("relation", 80), ("from", 170), ("to", 140)],
+            [("id", 70), ("guid", 190), ("class", 170), ("name", 260), ("relation", 80), ("from", 170),
+             ("block", 190), ("to", 140)],
         )
         self.log = self._text_tab("Export log")
 
@@ -209,7 +210,8 @@ class App(ttk.Frame):
             return
         self.report = report
         self.master_combo.configure(
-            values=[AUTO] + [f"#{b.step_id} {b.name} ({len(b.storeys)} storeys)" for b in report.buildings]
+            values=[AUTO] + [f"#{b.step_id} {b.global_id} ({len(b.storeys)} storeys) - single block"
+                             for b in report.buildings]
         )
         self._set_text(self.summary, format_detection(report))
         self._fill_buildings()
@@ -232,9 +234,17 @@ class App(ttk.Frame):
         for b in r.buildings:
             tag = "master" if b.role == "master" else ("" if b.included else "muted")
             include = "-" if b.role == "master" else ("yes" if b.included else "no")
+            block = self._block_label(b.block_id)
+            reason = b.reason if b.role == "master" else f"{b.block_reason}; {b.reason}"
             tree.insert("", "end", iid=str(b.step_id), tags=(tag,), values=(
-                b.role, include, b.step_id, b.name, f"#{b.site_id} {b.site_name}",
-                f"{b.z:,.1f} {u}", len(b.storeys), b.total_elements, b.reason))
+                b.role, include, b.step_id, b.global_id, block,
+                f"{b.z:,.1f} {u}", len(b.storeys), b.total_elements, reason))
+
+    def _block_label(self, master_id) -> str:
+        for number, block in enumerate(self.report.blocks, 1):
+            if block.master_id == master_id:
+                return f"Block {number} ({block.master_global_id})"
+        return ""
 
     def _fill_mapping(self) -> None:
         if self.report is None:
@@ -247,7 +257,8 @@ class App(ttk.Frame):
             ok = m.within_tolerance or not m.element_count
             tree.insert("", "end", tags=("" if ok else "warn",), values=(
                 f"#{m.building_id} {m.building_name}", f"{m.source_kind} #{m.source_id} '{m.source_name}'",
-                f"{m.source_z:,.1f}", f"#{m.target_id} {m.target_name}", f"{m.target_z:,.1f}",
+                f"{m.source_z:,.1f}", self._block_label(m.target_building_id),
+                f"#{m.target_id} {m.target_name}", f"{m.target_z:,.1f}",
                 f"{m.delta:,.1f}", m.element_count, "OK" if ok else "CHECK"))
 
     def _fill_elements(self) -> None:
@@ -255,7 +266,8 @@ class App(ttk.Frame):
         tree.delete(*tree.get_children())
         for m in self.report.moves:
             tree.insert("", "end", values=(m.step_id, m.global_id, m.ifc_class, m.name, m.relation,
-                                           f"#{m.source_id} {m.source_name}", m.target_name))
+                                           f"#{m.source_id} {m.source_name}",
+                                           self._block_label(m.target_building_id), m.target_name))
 
     def _toggle_include(self, event) -> None:
         if self.report is None or self.busy:
@@ -292,7 +304,6 @@ class App(ttk.Frame):
         if options is None:
             return
         options.include_building_ids = {b.step_id for b in self.report.included_buildings}
-        options.master_building_id = self.report.master_building_id
         self._run("Repairing and verifying...",
                   lambda: repair_file(src, out, options, overwrite_output=True), self._exported)
 

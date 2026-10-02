@@ -199,11 +199,11 @@ def _rebase(model, report, linked_placement_ids, before, notes) -> list[int]:
 
 
 def _linked_sites(model, report: DetectionReport) -> list:
-    master = report.master_building
+    master_site_ids = {b.site_id for b in report.master_buildings}
     included = {b.step_id for b in report.included_buildings}
     sites = []
     for site in model.by_type("IfcSite"):
-        if master is not None and site.id() == master.site_id:
+        if site.id() in master_site_ids:
             continue
         buildings = [c for c in children_of(site) if c.is_a("IfcBuilding")]
         if buildings and all(b.id() in included for b in buildings):

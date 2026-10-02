@@ -40,3 +40,21 @@ def test_sample_with_links(tmp_path, name):
     fixed = ifcopenshell.open(result.output_path)
     assert len(fixed.by_type("IfcBuilding")) == 1
     assert len(fixed.by_type("IfcSite")) == 1
+
+
+def test_site_master_multi_block(tmp_path):
+    path = os.path.join(SAMPLE_DIR, "REvit", "Site Master.ifc")
+    if not os.path.isfile(path):
+        pytest.skip(f"sample not found: {path}")
+    report = analyze(path)
+    by_guid = {b.global_id: b for b in report.buildings}
+    block_a = by_guid["2GpSE$G6cqQG$cxkhQKa9s"].step_id
+    block_b = by_guid["255Ewxp09I0A7CFuDkrVw1"].step_id
+    for guid in ("1QTWXF8WOshV8CYLES_fVB", "3GrA9SbsTTuqTQpgVW7vbF", "1Oi$d7JL53JMzV4VFThWYJ", "1rjuFUeiHsAR7oc9275wk1"):
+        unit = by_guid[guid]
+        assert unit.block_id == block_a and unit.included
+        assert {m.target_building_id for m in report.moves if m.building_id == unit.step_id} == {block_a}
+    assert sum(1 for m in report.moves if m.target_building_id == block_b) == 63
+    assert by_guid["2zLkFg$5fCX9SSV3Lq4366"].role == "master"  # site host keeps its own walls
+    result = repair_file(path, str(tmp_path / "fixed.ifc"))
+    assert result.verification.passed
