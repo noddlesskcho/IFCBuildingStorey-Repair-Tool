@@ -68,8 +68,8 @@ class App(ttk.Frame):
         theme.app_mark(inner).pack(side="left")
         titles = tk.Frame(inner, background=SURFACE)
         titles.pack(side="left", padx=12)
-        ttk.Label(titles, text="Linked Storey Repair", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(titles, text="Reassign Revit linked-model branches to their master storeys",
+        ttk.Label(titles, text="IFCBuildingStorey Repair Tool", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(titles, text="Move Revit linked-model elements onto the correct master IfcBuildingStorey",
                   style="Muted.Surface.TLabel").pack(anchor="w")
         ttk.Label(inner, text=f"v{__version__}", style="Muted.Surface.TLabel").pack(side="right", padx=(12, 0))
         self.status_pill = theme.pill(inner, "No file", "neutral")
@@ -515,7 +515,7 @@ class App(ttk.Frame):
 
 def run() -> None:
     root = tk.Tk()
-    root.title("Linked Storey Repair")
+    root.title("IFCBuildingStorey Repair Tool")
     root.geometry("1360x860")
     root.minsize(1100, 680)
     theme.apply(root)

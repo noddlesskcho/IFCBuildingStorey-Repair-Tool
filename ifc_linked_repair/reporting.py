@@ -105,7 +105,7 @@ def write_markdown_report(result: RepairResult, path: str) -> str:
     report = result.report
     u = report.length_unit
     out = [
-        "# IFC Linked Storey Repair Report",
+        "# IFCBuildingStorey Repair Tool Report",
         "",
         f"- Generated: {_dt.datetime.now().isoformat(timespec='seconds')}",
         f"- Input: `{result.input_path}`",

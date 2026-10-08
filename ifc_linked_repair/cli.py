@@ -62,7 +62,7 @@ def main(argv=None) -> int:
         run()
         return 0
 
-    parser = argparse.ArgumentParser(prog="ifc_linked_repair", description="Repair Revit linked-model IFC storeys.")
+    parser = argparse.ArgumentParser(prog="ifc_linked_repair", description="IFCBuildingStorey Repair Tool: move Revit linked-model elements onto the correct master IfcBuildingStorey.")
     sub = parser.add_subparsers(dest="command", required=True)
     pa = sub.add_parser("analyze", help="show detection report")
     _add_common(pa)

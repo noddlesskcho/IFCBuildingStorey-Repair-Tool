@@ -43,7 +43,7 @@ def test_sample_with_links(tmp_path, name):
 
 
 def test_site_master_multi_block(tmp_path):
-    path = os.path.join(SAMPLE_DIR, "REvit", "Site Master.ifc")
+    path = os.path.join(SAMPLE_DIR, "Revit 1st Test Project", "Site Master.ifc")
     if not os.path.isfile(path):
         pytest.skip(f"sample not found: {path}")
     report = analyze(path)
